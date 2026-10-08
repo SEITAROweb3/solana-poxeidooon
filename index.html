@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Solana Star Catcher</title>
+<style>
+  :root { --purple:#9945FF; --green:#14F195; --bg:#0b0718; }
+  * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; background:var(--bg); color:#fff;
+    font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP","Yu Gothic",sans-serif;
+    overflow:hidden; touch-action:manipulation; user-select:none; -webkit-user-select:none; }
+  #app { display:flex; flex-direction:column; height:100%; max-width:820px; margin:0 auto; }
+  header { padding:12px 16px 10px; text-align:center;
+    background:linear-gradient(90deg, rgba(153,69,255,.42), rgba(20,241,149,.2)); }
+  h1 { font-size:clamp(20px,5.5vw,30px); letter-spacing:.02em;
+    background:linear-gradient(90deg, var(--purple), var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .stats { display:flex; justify-content:space-around; margin-top:6px; font-size:clamp(16px,4.5vw,20px); font-weight:700; }
+  .stats b { color:var(--green); font-variant-numeric:tabular-nums; }
+  #stage { position:relative; flex:1; min-height:0; overflow:hidden; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair; }
+  .overlay { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:16px; text-align:center; padding:24px; background:rgba(11,7,24,.8); }
+  .overlay.hidden { display:none; }
+  .overlay h2 { font-size:clamp(22px,6vw,30px); }
+  .overlay p { color:#d4cdf0; line-height:1.8; font-size:clamp(14px,3.8vw,16px); }
+  .g { color:#14F195; font-weight:700; }
+  .p { color:#b98bff; font-weight:700; }
+  .big { font-size:clamp(40px,12vw,64px); font-weight:800; color:var(--green); }
+  button { appearance:none; border:0; cursor:pointer; font:inherit; font-weight:700; font-size:18px;
+    padding:14px 36px; border-radius:999px; color:#0b0718;
+    background:linear-gradient(90deg, var(--purple), var(--green));
+    box-shadow:0 6px 24px rgba(153,69,255,.45); }
+  button:active { transform:scale(.97); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Solana Star Catcher</h1>
+    <div class="stats">
+      <span>スコア <b id="score">0</b></span>
+      <span>残り時間 <b id="time">30</b> 秒</span>
+    </div>
+  </header>
+  <div id="stage">
+    <canvas id="game"></canvas>
+
+    <div id="startOverlay" class="overlay">
+      <h2>ポセイドンの海へようこそ！</h2>
+      <p>トライデントで海の魚や怪物を<br>クリック／タップして倒そう。<br>
+         <span class="g">小さな緑の魚</span> 1点 ／ <span class="p">紫の魚</span> 2点<br>
+         <span class="p">怪物</span>は2回当てると倒せて 5点！<br>
+         制限時間は30秒です。</p>
+      <button id="startBtn">スタート</button>
+    </div>
+
+    <div id="endOverlay" class="overlay hidden">
+      <h2>タイムアップ！</h2>
+      <div class="big" id="finalScore">0</div>
+      <p id="bestText"></p>
+      <button id="retryBtn">もう一度</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var PURPLE = "#9945FF", GREEN = "#14F195";
+  var GAME_SECONDS = 30;
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var scoreEl = document.getElementById("score");
+  var timeEl = document.getElementById("time");
+  var startOverlay = document.getElementById("startOverlay");
+  var endOverlay = document.getElementById("endOverlay");
+  var finalScoreEl = document.getElementById("finalScore");
+  var bestTextEl = document.getElementById("bestText");
+
+  var W = 0, H = 0, B = 0, u = 0, sy = 0, handX = 0, handY = 0, tLen = 0;
+  var enemies = [], dying = [], pops = [], bubbles = [], rings = [], skyStars = [];
+  var stab = null;
+  var score = 0, best = 0, timeLeft = GAME_SECONDS, elapsed = 0, clock = 0;
+  var running = false, lastTs = 0, spawnTimer = 0;
+
+  /* ---------- サイズ調整 ---------- */
+  function resize() {
+    var r = canvas.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    B = Math.min(W, H);
+    u = Math.min(B * 0.12, H * 0.14);
+    sy = u * 1.9;                       // 水面の高さ
+    handX = W / 2 + u * 0.65;
+    handY = sy - u * 0.6;
+    tLen = u * 1.9;
+    skyStars = [];
+    for (var i = 0; i < 30; i++) {
+      skyStars.push({ x: Math.random() * W, y: Math.random() * sy * 0.9, r: Math.random() * 1.3 + .3, a: Math.random() * .6 + .2 });
+    }
+  }
+  window.addEventListener("resize", resize);
+
+  /* ---------- 敵 ---------- */
+  var TYPES = {
+    small:   { color: GREEN,     rK: 0.040, hp: 1, pts: 1, speed: 0.30 },
+    fish:    { color: PURPLE,    rK: 0.062, hp: 1, pts: 2, speed: 0.20 },
+    monster: { color: "#7a2fd6", rK: 0.110, hp: 2, pts: 5, speed: 0.12 }
+  };
+
+  function spawnEnemy() {
+    if (enemies.length > 14) return;
+    var roll = Math.random();
+    var type = "small";
+    if (roll > 0.55) type = "fish";
+    if (elapsed > 3 && roll > 0.86) type = "monster";
+    var t = TYPES[type];
+    var r = B * t.rK;
+    var dir = Math.random() < 0.5 ? 1 : -1;
+    var ymin = sy + u * 0.8 + r;
+    var ymax = H - r * (type === "monster" ? 2.0 : 1.3) - 8;
+    if (ymax < ymin) ymax = ymin;
+    var speed = W * t.speed * (0.85 + Math.random() * 0.4) * (1 + elapsed / 50);
+    enemies.push({
+      type: type, color: t.color, r: r, hp: t.hp, maxHp: t.hp, pts: t.pts,
+      dir: dir, x: dir === 1 ? -r * 1.8 : W + r * 1.8,
+      baseY: ymin + Math.random() * (ymax - ymin), y: 0,
+      vx: dir * speed, ph: Math.random() * 6.28,
+      wob: 1.5 + Math.random() * 1.5, amp: r * (type === "monster" ? 0.2 : 0.35),
+      flash: 0
+    });
+  }
+
+  /* ---------- 描画：敵 ---------- */
+  function drawFish(e) {
+    var r = e.r, col = e.flash > 0 ? "#ffffff" : e.color;
+    ctx.fillStyle = col; ctx.shadowColor = e.color; ctx.shadowBlur = 10;
+    var wag = Math.sin(clock * 10 + e.ph) * r * 0.18;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.7, 0); ctx.lineTo(-r * 1.4, -r * 0.5 + wag); ctx.lineTo(-r * 1.4, r * 0.5 + wag);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.58, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.25, -r * 0.5); ctx.lineTo(r * 0.1, -r * 0.95); ctx.lineTo(r * 0.4, -r * 0.5);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.28)";
+    ctx.beginPath(); ctx.ellipse(r * 0.05, r * 0.2, r * 0.7, r * 0.24, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(r * 0.5, -r * 0.12, r * 0.17, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#120a26";
+    ctx.beginPath(); ctx.arc(r * 0.54, -r * 0.12, r * 0.08, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawMonster(e) {
+    var r = e.r, col = e.flash > 0 ? "#ffffff" : (e.hp < e.maxHp ? "#a24cf0" : e.color);
+    ctx.strokeStyle = col; ctx.lineCap = "round"; ctx.lineWidth = r * 0.16;
+    for (var i = 0; i < 5; i++) {
+      var x0 = -r * 0.7 + i * r * 0.35;
+      ctx.beginPath(); ctx.moveTo(x0, r * 0.4);
+      for (var s = 1; s <= 8; s++) {
+        ctx.lineTo(x0 + Math.sin(clock * 4 + i + s * 0.6) * r * 0.14 * (s / 4), r * 0.4 + s * r * 0.18);
+      }
+      ctx.stroke();
+    }
+    ctx.shadowColor = GREEN; ctx.shadowBlur = 16;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = GREEN;
+    for (var k = -1; k <= 1; k++) {
+      ctx.beginPath();
+      ctx.moveTo(k * r * 0.3 - r * 0.1, -r * 0.72); ctx.lineTo(k * r * 0.3, -r * 1.05); ctx.lineTo(k * r * 0.3 + r * 0.1, -r * 0.72);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.globalAlpha *= 0.6;
+    ctx.beginPath(); ctx.arc(-r * 0.55, r * 0.25, r * 0.08, 0, 6.3); ctx.arc(r * 0.6, r * 0.2, r * 0.1, 0, 6.3); ctx.fill();
+    ctx.globalAlpha /= 0.6;
+    [-1, 1].forEach(function (sd) {
+      ctx.fillStyle = GREEN;
+      ctx.beginPath(); ctx.arc(sd * r * 0.32, -r * 0.1, r * 0.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#120a26";
+      ctx.beginPath(); ctx.ellipse(sd * r * 0.32, -r * 0.1, r * 0.06, r * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#120a26"; ctx.lineWidth = r * 0.07;
+      ctx.beginPath(); ctx.moveTo(sd * r * 0.58, -r * 0.4); ctx.lineTo(sd * r * 0.1, -r * 0.24); ctx.stroke();
+    });
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.moveTo(-r * 0.4, r * 0.3);
+    for (var z = 0; z < 6; z++) ctx.lineTo(-r * 0.4 + z * r * 0.16 + r * 0.08, r * 0.3 + ((z % 2 === 0) ? r * 0.16 : 0));
+    ctx.lineTo(r * 0.4, r * 0.3); ctx.closePath(); ctx.fill();
+  }
+
+  function drawEnemy(e, alpha, rot) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    if (rot) ctx.rotate(rot);
+    ctx.scale(e.dir, 1);
+    ctx.globalAlpha = alpha;
+    if (e.type === "monster") drawMonster(e); else drawFish(e);
+    ctx.restore();
+  }
+
+  /* ---------- 描画：ポセイドン＆トライデント ---------- */
+  function drawTrident(cx, cy, angle, len) {
+    ctx.save();
+    ctx.translate(cx, cy); ctx.rotate(angle);
+    ctx.shadowColor = GREEN; ctx.shadowBlur = 12;
+    ctx.strokeStyle = GREEN; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(3, len * 0.04);
+    var w = len * 0.15, hy = -len * 0.5 + len * 0.2;
+    ctx.beginPath(); ctx.moveTo(0, len * 0.5); ctx.lineTo(0, -len * 0.5); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-w, -len * 0.5 + len * 0.07);
+    ctx.lineTo(-w, hy); ctx.quadraticCurveTo(-w, hy + len * 0.06, 0, hy + len * 0.06);
+    ctx.quadraticCurveTo(w, hy + len * 0.06, w, hy); ctx.lineTo(w, -len * 0.5 + len * 0.07);
+    ctx.stroke();
+    ctx.fillStyle = GREEN; ctx.shadowBlur = 0;
+    [[-w, -len * 0.5 + len * 0.07], [0, -len * 0.5], [w, -len * 0.5 + len * 0.07]].forEach(function (p) {
+      ctx.beginPath(); ctx.moveTo(p[0] - len * 0.03, p[1] + len * 0.02); ctx.lineTo(p[0], p[1] - len * 0.05);
+      ctx.lineTo(p[0] + len * 0.03, p[1] + len * 0.02); ctx.closePath(); ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  function drawPoseidon() {
+    var cx = W / 2, skin = "#f2c9a0";
+    var g = ctx.createLinearGradient(0, sy - u, 0, sy + u * 0.3);
+    g.addColorStop(0, PURPLE); g.addColorStop(1, "#5b2aa8");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(cx - u * 0.5, sy + u * 0.3); ctx.lineTo(cx - u * 0.5, sy - u * 0.75);
+    ctx.quadraticCurveTo(cx - u * 0.5, sy - u * 1.0, cx - u * 0.2, sy - u * 1.0);
+    ctx.lineTo(cx + u * 0.2, sy - u * 1.0);
+    ctx.quadraticCurveTo(cx + u * 0.5, sy - u * 1.0, cx + u * 0.5, sy - u * 0.75);
+    ctx.lineTo(cx + u * 0.5, sy + u * 0.3); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = GREEN; ctx.lineWidth = u * 0.06;
+    ctx.beginPath(); ctx.moveTo(cx - u * 0.4, sy - u * 0.85); ctx.lineTo(cx + u * 0.4, sy - u * 0.55); ctx.stroke();
+    ctx.strokeStyle = skin; ctx.lineWidth = u * 0.2; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(cx + u * 0.42, sy - u * 0.85); ctx.lineTo(handX, handY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - u * 0.42, sy - u * 0.85); ctx.lineTo(cx - u * 0.62, sy - u * 0.3); ctx.stroke();
+    ctx.fillStyle = skin;
+    ctx.beginPath(); ctx.arc(cx, sy - u * 1.25, u * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#e9e4ff";
+    ctx.beginPath(); ctx.arc(cx, sy - u * 1.3, u * 0.3, Math.PI, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx - u * 0.27, sy - u * 1.2);
+    ctx.quadraticCurveTo(cx - u * 0.3, sy - u * 0.65, cx, sy - u * 0.58);
+    ctx.quadraticCurveTo(cx + u * 0.3, sy - u * 0.65, cx + u * 0.27, sy - u * 1.2);
+    ctx.quadraticCurveTo(cx, sy - u * 1.02, cx - u * 0.27, sy - u * 1.2);
+    ctx.fill();
+    ctx.fillStyle = "#120a26";
+    ctx.beginPath(); ctx.arc(cx - u * 0.1, sy - u * 1.27, u * 0.03, 0, 6.3); ctx.arc(cx + u * 0.1, sy - u * 1.27, u * 0.03, 0, 6.3); ctx.fill();
+    var y0 = sy - u * 1.5;
+    ctx.fillStyle = GREEN;
+    ctx.beginPath();
+    ctx.moveTo(cx - u * 0.26, y0 + u * 0.1); ctx.lineTo(cx - u * 0.26, y0 - u * 0.12); ctx.lineTo(cx - u * 0.13, y0);
+    ctx.lineTo(cx, y0 - u * 0.2); ctx.lineTo(cx + u * 0.13, y0); ctx.lineTo(cx + u * 0.26, y0 - u * 0.12);
+    ctx.lineTo(cx + u * 0.26, y0 + u * 0.1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = skin;
+    ctx.beginPath(); ctx.arc(handX, handY, u * 0.11, 0, Math.PI * 2); ctx.fill();
+  }
+
+  /* ---------- 描画：全体 ---------- */
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    var sky = ctx.createLinearGradient(0, 0, 0, sy);
+    sky.addColorStop(0, "#120a2e"); sky.addColorStop(1, "#4a2593");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, sy + 10);
+    ctx.fillStyle = "#fff";
+    for (var i = 0; i < skyStars.length; i++) {
+      var s = skyStars[i]; ctx.globalAlpha = s.a;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    drawPoseidon();
+
+    var sea = ctx.createLinearGradient(0, sy, 0, H);
+    sea.addColorStop(0, "rgba(46,32,125,.88)"); sea.addColorStop(0.55, "rgba(20,36,92,.94)"); sea.addColorStop(1, "rgba(5,38,34,.98)");
+    ctx.fillStyle = sea;
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (var x = 0; x <= W + 8; x += 8) ctx.lineTo(x, sy + Math.sin(x * 0.03 + clock * 2) * 4);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = GREEN; ctx.lineWidth = 2; ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    for (var x2 = 0; x2 <= W + 8; x2 += 8) {
+      var yy = sy + Math.sin(x2 * 0.03 + clock * 2) * 4;
+      if (x2 === 0) ctx.moveTo(x2, yy); else ctx.lineTo(x2, yy);
+    }
+    ctx.stroke(); ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.lineWidth = 1.5;
+    for (var b = 0; b < bubbles.length; b++) {
+      var bb = bubbles[b];
+      ctx.beginPath(); ctx.arc(bb.x, bb.y, bb.r, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    for (var d = 0; d < dying.length; d++) {
+      var dd = dying[d];
+      drawEnemy(dd.e, Math.max(0, 1 - dd.t / 0.45), dd.rot);
+    }
+    for (var n = 0; n < enemies.length; n++) drawEnemy(enemies[n], 1, 0);
+
+    for (var q = 0; q < rings.length; q++) {
+      var rg = rings[q];
+      ctx.globalAlpha = Math.max(0, rg.life / 0.4);
+      ctx.strokeStyle = GREEN; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    if (stab) {
+      var tt = stab.t / stab.dur;
+      var qq = tt < 0.4 ? tt / 0.4 : (1 - tt) / 0.6;
+      qq = 1 - (1 - qq) * (1 - qq);
+      var dx = stab.tx - handX, dy = stab.ty - handY;
+      var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      var ux = dx / dist, uy = dy / dist;
+      var ang = Math.atan2(ux, -uy);
+      var ex = stab.tx - ux * tLen / 2, ey = stab.ty - uy * tLen / 2;
+      drawTrident(handX + (ex - handX) * qq, handY + (ey - handY) * qq, ang, tLen);
+    } else {
+      drawTrident(handX, handY, 0, tLen);
+    }
+
+    ctx.textAlign = "center"; ctx.font = "bold 22px system-ui, sans-serif";
+    for (var k = 0; k < pops.length; k++) {
+      var p = pops[k];
+      ctx.globalAlpha = Math.max(0, p.life / 0.6);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------- 更新 ---------- */
+  function updateEffects(dt) {
+    if (Math.random() < dt * 5) {
+      bubbles.push({ x: Math.random() * W, y: H + 6, r: 2 + Math.random() * 4, vx: 0, vy: -(25 + Math.random() * 35) });
+    }
+    for (var i = bubbles.length - 1; i >= 0; i--) {
+      var b = bubbles[i];
+      b.x += (b.vx || 0) * dt + Math.sin(clock * 3 + i) * 0.2; b.y += b.vy * dt;
+      if (b.y < sy + 4) bubbles.splice(i, 1);
+    }
+    for (var k = pops.length - 1; k >= 0; k--) {
+      pops[k].y -= 40 * dt; pops[k].life -= dt;
+      if (pops[k].life <= 0) pops.splice(k, 1);
+    }
+    for (var r = rings.length - 1; r >= 0; r--) {
+      rings[r].r += 90 * dt; rings[r].life -= dt;
+      if (rings[r].life <= 0) rings.splice(r, 1);
+    }
+    for (var d = dying.length - 1; d >= 0; d--) {
+      var dd = dying[d];
+      dd.t += dt; dd.e.y -= 40 * dt; dd.rot += 6 * dt * dd.e.dir;
+      if (dd.t > 0.45) dying.splice(d, 1);
+    }
+    if (stab) { stab.t += dt; if (stab.t >= stab.dur) stab = null; }
+  }
+
+  function update(dt) {
+    elapsed += dt; timeLeft -= dt; spawnTimer -= dt;
+    var interval = Math.max(0.3, 0.7 - elapsed * 0.013);
+    if (spawnTimer <= 0) { spawnEnemy(); spawnTimer = interval; }
+    for (var i = enemies.length - 1; i >= 0; i--) {
+      var e = enemies[i];
+      e.x += e.vx * dt;
+      e.y = e.baseY + Math.sin(clock * e.wob + e.ph) * e.amp;
+      if (e.flash > 0) e.flash -= dt;
+      if ((e.dir === 1 && e.x > W + e.r * 2.5) || (e.dir === -1 && e.x < -e.r * 2.5)) enemies.splice(i, 1);
+    }
+    timeEl.textContent = Math.max(0, Math.ceil(timeLeft));
+    if (timeLeft <= 0) endGame();
+  }
+
+  function loop(ts) {
+    var dt = Math.min(0.05, (ts - lastTs) / 1000 || 0);
+    lastTs = ts; clock += dt;
+    if (running) update(dt);
+    updateEffects(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- ゲーム進行 ---------- */
+  function startGame() {
+    enemies = []; dying = []; pops = []; rings = []; stab = null;
+    score = 0; elapsed = 0; timeLeft = GAME_SECONDS; spawnTimer = 0;
+    scoreEl.textContent = "0"; timeEl.textContent = String(GAME_SECONDS);
+    startOverlay.classList.add("hidden");
+    endOverlay.classList.add("hidden");
+    running = true;
+  }
+
+  function endGame() {
+    running = false;
+    if (score > best) best = score;
+    finalScoreEl.textContent = score + " 点";
+    bestTextEl.textContent = "ベストスコア：" + best + " 点";
+    endOverlay.classList.remove("hidden");
+  }
+
+  function onPointer(e) {
+    if (!running) return;
+    e.preventDefault();
+    var rect = canvas.getBoundingClientRect();
+    var x = e.clientX - rect.left, y = e.clientY - rect.top;
+    stab = { tx: x, ty: Math.max(y, sy - u * 0.5), t: 0, dur: 0.28 };
+    rings.push({ x: x, y: y, r: 6, life: 0.4 });
+
+    for (var i = enemies.length - 1; i >= 0; i--) {
+      var en = enemies[i];
+      var isM = en.type === "monster";
+      var rx = en.r * (isM ? 1.1 : 1.25) + 10, ry = en.r * (isM ? 1.1 : 0.75) + 10;
+      var dx = (x - en.x) / rx, dy = (y - en.y) / ry;
+      if (dx * dx + dy * dy <= 1) {
+        en.hp--;
+        if (en.hp <= 0) {
+          score += en.pts; scoreEl.textContent = score;
+          pops.push({ x: en.x, y: en.y - en.r * 0.5, text: "+" + en.pts, color: GREEN, life: 0.6 });
+          dying.push({ e: en, t: 0, rot: 0 });
+          enemies.splice(i, 1);
+          for (var b = 0; b < 8; b++) {
+            bubbles.push({ x: en.x + (Math.random() - .5) * en.r, y: en.y + (Math.random() - .5) * en.r,
+              r: 2 + Math.random() * 4, vx: (Math.random() - .5) * 60, vy: -(30 + Math.random() * 50) });
+          }
+        } else {
+          en.flash = 0.15;
+          pops.push({ x: en.x, y: en.y - en.r * 0.5, text: "HIT!", color: "#d9c2ff", life: 0.6 });
+        }
+        break;
+      }
+    }
+  }
+
+  canvas.addEventListener("pointerdown", onPointer);
+  document.getElementById("startBtn").addEventListener("click", startGame);
+  document.getElementById("retryBtn").addEventListener("click", startGame);
+
+  resize();
+  requestAnimationFrame(function (ts) { lastTs = ts; requestAnimationFrame(loop); });
+})();
+</script>
+</body>
+</html>
